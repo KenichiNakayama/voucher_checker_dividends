@@ -265,6 +265,8 @@ class VoucherExtractor:
 
         try:
             response = client.extract(parsed)
+        except NotImplementedError:
+            return self._fallback.extract(parsed, provider)
         except Exception as exc:  # pragma: no cover - network path not used in tests
             raise ExtractionError(str(exc)) from exc
 
