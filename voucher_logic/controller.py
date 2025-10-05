@@ -52,7 +52,11 @@ def analyze_voucher(
     validation = validator.validate(extracted)
 
     try:
-        highlight_pdf = highlight_renderer.render(file_bytes, extracted.source_highlights)
+        highlight_pdf = highlight_renderer.render(
+            file_bytes,
+            extracted.source_highlights,
+            parsed_document=parsed,
+        )
         warnings = []
     except Exception as exc:
         highlight_pdf = file_bytes

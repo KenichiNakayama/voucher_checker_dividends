@@ -51,21 +51,40 @@ def render_results(result: models.VoucherAnalysisResult) -> None:
             st.error(error)
         return
 
-    if result.warnings:
-        for warning in result.warnings:
-            st.warning(warning)
-
-    st.subheader("検証結果")
     validation_rows = build_validation_rows(result.validation)
+    requirements = result.validation.requirements
+    total_checks = len(requirements)
+    pass_count = sum(1 for status in requirements.values() if status.status is models.RequirementState.PASS)
+    fail_count = sum(1 for status in requirements.values() if status.status is models.RequirementState.FAIL)
+    pending_count = total_checks - pass_count - fail_count
+
+    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='voucher-section-title'>検証サマリー</div>", unsafe_allow_html=True)
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("チェック数", total_checks)
+    summary_cols[1].metric("合格", pass_count)
+    summary_cols[2].metric("要確認", fail_count + pending_count)
+
+    if result.warnings:
+        chips = "".join(
+            f"<span class='voucher-chip warning'>{warning}</span>" for warning in result.warnings
+        )
+        st.markdown(chips, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='voucher-section-title'>検証結果</div>", unsafe_allow_html=True)
     if validation_rows:
-        st.table(validation_rows)
+        st.dataframe(validation_rows, use_container_width=True)
     else:
         st.info("検証結果はまだありません。")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.subheader("抽出情報")
     extracted_entries = format_extracted_fields(result.extracted)
+    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='voucher-section-title'>抽出情報</div>", unsafe_allow_html=True)
     if extracted_entries:
-        st.table(extracted_entries)
+        st.dataframe(extracted_entries, use_container_width=True)
     else:
         st.info("抽出された情報はありません。")
 
@@ -75,13 +94,58 @@ def render_results(result: models.VoucherAnalysisResult) -> None:
             data=result.highlight_pdf,
             file_name="voucher_highlight.pdf",
             mime="application/pdf",
+            type="secondary",
         )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def main() -> None:
     ensure_streamlit()
     st.set_page_config(page_title="Voucher Checker", layout="wide")
-    st.title("配当バウチャー検証アプリ")
+    st.markdown(
+        """
+        <style>
+        .voucher-card {
+            background: linear-gradient(145deg, rgba(23,28,38,0.95), rgba(16,20,27,0.95));
+            border-radius: 18px;
+            padding: 1.6rem 1.8rem;
+            margin-bottom: 1.8rem;
+            border: 1px solid rgba(255,255,255,0.04);
+            box-shadow: 0 24px 48px rgba(0,0,0,0.35);
+        }
+        .voucher-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.3rem 0.8rem;
+            border-radius: 999px;
+            background: rgba(148, 189, 255, 0.16);
+            color: #9ecbff;
+            font-size: 0.85rem;
+            margin-right: 0.6rem;
+            margin-bottom: 0.4rem;
+        }
+        .voucher-chip.warning {
+            background: rgba(255, 193, 7, 0.16);
+            color: #ffda6a;
+        }
+        .voucher-chip.error {
+            background: rgba(255, 82, 82, 0.18);
+            color: #ff9a9a;
+        }
+        .voucher-section-title {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.8rem;
+            letter-spacing: 0.03em;
+        }
+        .css-1xarl3l, .stDataFrame { font-size: 0.9rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("配当バウチャー検証ダッシュボード")
+    st.caption("配当バウチャーから重要項目を抽出し、ビジネス意思決定を支援します。")
 
     st.sidebar.header("設定")
     provider_label = st.sidebar.selectbox(
@@ -104,8 +168,11 @@ def main() -> None:
                 )
             )
 
-    uploaded_file = st.file_uploader("バウチャーPDFをアップロード", type=["pdf"])
-    analyze_button = st.button("解析を実行する", type="primary")
+    with st.container():
+        st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("バウチャーPDFをアップロード", type=["pdf"])
+        analyze_button = st.button("解析を実行する", type="primary")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     if analyze_button:
         errors = validate_inputs(uploaded_file, provider_label)

@@ -17,7 +17,7 @@ class FailingPdfIngestor(PdfIngestor):
 
 
 class DummyHighlightRenderer(HighlightRenderer):
-    def render(self, original_pdf: bytes, spans):
+    def render(self, original_pdf: bytes, spans, parsed_document=None):
         raise RuntimeError("highlight failure")
 
 

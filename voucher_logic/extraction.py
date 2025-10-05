@@ -4,15 +4,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import models
 from .llm.clients import DummyLLMClient, LLMClientFactory
 
-COMPANY_PATTERN = re.compile(r"Company\s*[:：]\s*(.+)", re.IGNORECASE)
-DATE_PATTERN = re.compile(r"Date\s*[:：]\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
-AMOUNT_PATTERN = re.compile(r"Amount\s*[:：]\s*([\d,\.]+)", re.IGNORECASE)
-TITLE_PATTERN = re.compile(r"^(Dividend Resolution|配当決議.*)$", re.IGNORECASE)
+TITLE_PATTERN = re.compile(r"^(Dividend\s+Resolution|配当決議.*|Board\s+Resolution.*)$", re.IGNORECASE)
+COMPANY_LINE_PATTERN = re.compile(
+    r"(?:Company\s*(?:Name)?|会社名|Corporate\s+Name)\s*[:：-]\s*(.+)",
+    re.IGNORECASE,
+)
+COMPANY_SUFFIX_PATTERN = re.compile(
+    r"\b(?:Inc\.?|Corp\.?|Corporation|Company|Co\.?|Holdings|Limited|Ltd\.?|K\.K\.|LLC|GmbH|Kabushiki\s+Kaisha)\b",
+    re.IGNORECASE,
+)
+DATE_PATTERN = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+DIVIDEND_LINE_PATTERN = re.compile(
+    r"(?:Total\s+Amount\s+of\s+Dividends|Total\s+Dividends|配当金額)\s*[:：-]?\s*(.+)",
+    re.IGNORECASE,
+)
+NUMERIC_AMOUNT_PATTERN = re.compile(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d+)?|\d+(?:\.\d+)?)")
 
 
 class ExtractionError(RuntimeError):
@@ -29,46 +40,167 @@ class RuleBasedVoucherExtractor:
     """Fallback extractor based on regex heuristics."""
 
     def extract(self, parsed: models.ParsedDocument, provider: models.ProviderType) -> models.ExtractedVoucherData:
-        text = "\n".join(parsed.pages)
         highlights: List[models.HighlightSpan] = []
 
-        title_value = self._match_title(parsed)
-        company_match = COMPANY_PATTERN.search(text)
-        date_match = DATE_PATTERN.search(text)
-        amount_match = AMOUNT_PATTERN.search(text)
-
         data = models.ExtractedVoucherData.empty()
-        data.title = models.FieldValue(value=title_value, confidence=0.4)
-        if company_match:
-            value = company_match.group(1).strip()
-            span = self._make_span(parsed, value, label="company")
-            data.company_name = models.FieldValue(value=value, confidence=0.5, source_spans=[span])
-            highlights.append(span)
-        if date_match:
-            value = date_match.group(1).strip()
-            span = self._make_span(parsed, value, label="resolution_date")
-            data.resolution_date = models.FieldValue(value=value, confidence=0.5, source_spans=[span])
-            highlights.append(span)
-        if amount_match:
-            value = amount_match.group(1).strip()
-            span = self._make_span(parsed, value, label="dividend_amount")
-            data.dividend_amount = models.FieldValue(value=value, confidence=0.4, source_spans=[span])
-            highlights.append(span)
+        data.title = self._extract_title(parsed)
+
+        company = self._extract_company(parsed)
+        if company:
+            data.company_name = self._field_with_span(company, parsed, label="company_name", confidence=0.85)
+            highlights.extend(data.company_name.source_spans)
+
+        resolution_date = self._extract_resolution_date(parsed)
+        if resolution_date:
+            data.resolution_date = self._field_with_span(
+                resolution_date,
+                parsed,
+                label="resolution_date",
+                confidence=0.8,
+            )
+            highlights.extend(data.resolution_date.source_spans)
+
+        amount = self._extract_dividend_amount(parsed)
+        if amount:
+            data.dividend_amount = self._field_with_span(
+                amount,
+                parsed,
+                label="dividend_amount",
+                confidence=0.75,
+            )
+            highlights.extend(data.dividend_amount.source_spans)
 
         data.source_highlights = highlights
         return data
 
-    def _make_span(self, parsed: models.ParsedDocument, needle: str, label: str) -> models.HighlightSpan:
-        for token in parsed.tokens:
-            if needle.lower() in token.text.lower():
-                return models.HighlightSpan(page=token.page, bbox=(0.0, 0.0, 1.0, 0.2), label=label)
-        return models.HighlightSpan(page=1, bbox=(0.0, 0.0, 1.0, 0.2), label=label)
-
-    def _match_title(self, parsed: models.ParsedDocument) -> Optional[str]:
+    def _extract_title(self, parsed: models.ParsedDocument) -> models.FieldValue:
         for token in parsed.tokens:
             if TITLE_PATTERN.match(token.text.strip()):
-                return token.text.strip()
-        return parsed.pages[0].splitlines()[0].strip() if parsed.pages and parsed.pages[0] else None
+                span = self._highlight_from_token(token, label="title")
+                return models.FieldValue(value=token.text.strip(), confidence=0.9, source_spans=[span])
+
+        if parsed.pages:
+            first_page_lines = [line.strip() for line in parsed.pages[0].splitlines() if line.strip()]
+            if first_page_lines:
+                value = first_page_lines[0]
+                span = self._find_span_by_text(parsed, value, label="title")
+                if span:
+                    return models.FieldValue(value=value, confidence=0.6, source_spans=[span])
+                return models.FieldValue(value=value, confidence=0.6)
+        return models.FieldValue.empty()
+
+    def _extract_company(self, parsed: models.ParsedDocument) -> Optional[str]:
+        lines = list(self._iter_page_lines(parsed))
+        for _, _, text in lines:
+            match = COMPANY_LINE_PATTERN.search(text)
+            if match:
+                return match.group(1).strip()
+
+        candidate = self._find_company_candidate_by_proximity(lines)
+        if candidate:
+            return candidate
+        return None
+
+    def _find_company_candidate_by_proximity(self, lines: Sequence[Tuple[int, int, str]]) -> Optional[str]:
+        top_candidates: List[str] = []
+        for page, index, text in lines:
+            if index > 8:
+                break
+            if COMPANY_SUFFIX_PATTERN.search(text):
+                top_candidates.append(text.strip())
+
+        if top_candidates:
+            return top_candidates[0]
+
+        for idx, (_, _, text) in enumerate(lines):
+            lower = text.lower()
+            if lower.startswith("address") or "corporate number" in lower:
+                # Prefer the line immediately before address block.
+                for back in range(1, 4):
+                    if idx - back < 0:
+                        continue
+                    candidate = lines[idx - back][2].strip()
+                    if candidate and not candidate.lower().startswith("address"):
+                        return candidate
+        return None
+
+    def _extract_resolution_date(self, parsed: models.ParsedDocument) -> Optional[str]:
+        lines = list(self._iter_page_lines(parsed))
+        for _, _, text in lines:
+            dates = DATE_PATTERN.findall(text)
+            if not dates:
+                continue
+            lower = text.lower()
+            if "meeting" in lower or "resolved" in lower or "決議" in lower:
+                return dates[0]
+
+        # fallback: first date encountered
+        for _, _, text in lines:
+            dates = DATE_PATTERN.findall(text)
+            if dates:
+                return dates[0]
+        return None
+
+    def _extract_dividend_amount(self, parsed: models.ParsedDocument) -> Optional[str]:
+        for _, _, text in self._iter_page_lines(parsed):
+            match = DIVIDEND_LINE_PATTERN.search(text)
+            if match:
+                amount_candidate = match.group(1)
+                numeric = self._extract_numeric(amount_candidate)
+                if numeric:
+                    return numeric
+
+        for _, _, text in self._iter_page_lines(parsed):
+            if "dividend" not in text.lower():
+                continue
+            numeric = self._extract_numeric(text)
+            if numeric:
+                return numeric
+        return None
+
+    def _extract_numeric(self, text: str) -> Optional[str]:
+        match = NUMERIC_AMOUNT_PATTERN.search(text.replace("JPY", "").replace("¥", ""))
+        if not match:
+            return None
+        return match.group(1)
+
+    def _field_with_span(
+        self,
+        value: str,
+        parsed: models.ParsedDocument,
+        *,
+        label: str,
+        confidence: float,
+    ) -> models.FieldValue:
+        span = self._find_span_by_text(parsed, value, label=label)
+        if span:
+            return models.FieldValue(value=value, confidence=confidence, source_spans=[span])
+        return models.FieldValue(value=value, confidence=confidence)
+
+    def _find_span_by_text(
+        self,
+        parsed: models.ParsedDocument,
+        needle: str,
+        *,
+        label: str,
+    ) -> Optional[models.HighlightSpan]:
+        normalized = needle.lower()
+        for token in parsed.tokens:
+            if normalized in token.text.lower():
+                return self._highlight_from_token(token, label)
+        return None
+
+    def _highlight_from_token(self, token: models.TextSpan, label: str) -> models.HighlightSpan:
+        if token.bbox is None:
+            return models.HighlightSpan(page=token.page, bbox=(0.05, 0.75, 0.95, 0.8), label=label)
+        return models.HighlightSpan(page=token.page, bbox=token.bbox, label=label)
+
+    def _iter_page_lines(self, parsed: models.ParsedDocument) -> Iterable[Tuple[int, int, str]]:
+        for page_index, page in enumerate(parsed.pages, start=1):
+            for line_index, raw_line in enumerate(page.splitlines()):
+                line = raw_line.strip()
+                if line:
+                    yield (page_index, line_index, line)
 
 
 class VoucherExtractor:
