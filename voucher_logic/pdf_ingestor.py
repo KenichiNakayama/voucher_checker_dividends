@@ -22,6 +22,18 @@ class _PageExtraction:
     spans: List[models.TextSpan]
 
 
+def _contains_cjk(text: str) -> bool:
+    for char in text:
+        code_point = ord(char)
+        if (
+            0x3040 <= code_point <= 0x30FF  # Hiragana & Katakana
+            or 0x4E00 <= code_point <= 0x9FFF  # CJK Unified Ideographs
+            or 0xFF00 <= code_point <= 0xFFEF  # Half/Full width forms
+        ):
+            return True
+    return False
+
+
 class PdfIngestor:
     """Parses PDF bytes into the internal ParsedDocument representation."""
 
@@ -147,7 +159,13 @@ class PdfIngestor:
 
         for entries in grouped.values():
             entries.sort(key=lambda item: item[7] if len(item) > 7 else 0)
-            text = " ".join(str(entry[4]) for entry in entries if len(entry) > 4 and entry[4])
+            pieces = [str(entry[4]) for entry in entries if len(entry) > 4 and entry[4]]
+            if not pieces:
+                continue
+            if any(_contains_cjk(piece) for piece in pieces):
+                text = "".join(pieces)
+            else:
+                text = " ".join(pieces)
             if not text:
                 continue
             x0 = min(float(entry[0]) for entry in entries)

@@ -66,3 +66,32 @@ def test_rule_based_extractor_handles_realistic_document():
     assert extracted.company_name.value == "Acme Holdings K.K."
     assert extracted.resolution_date.value == "2025-03-30"
     assert extracted.dividend_amount.value == "36,000,000"
+
+
+def test_rule_based_extractor_handles_japanese_labels_and_dates():
+    sample_page = (
+        "会社名\n"
+        "ＡＢＣ株式会社\n"
+        "配当基準日：2024年03月31日\n"
+        "配当決議日：2024年04月15日\n"
+        "効力発生日：2024年04月30日\n"
+        "総配当金額：1,234,567円\n"
+    )
+    tokens = [
+        models.TextSpan(page=1, text="会社名", bbox=(0.1, 0.82, 0.4, 0.88)),
+        models.TextSpan(page=1, text="ＡＢＣ株式会社", bbox=(0.1, 0.76, 0.6, 0.82)),
+        models.TextSpan(page=1, text="配当基準日：2024年03月31日", bbox=(0.1, 0.65, 0.8, 0.72)),
+        models.TextSpan(page=1, text="配当決議日：2024年04月15日", bbox=(0.1, 0.55, 0.8, 0.62)),
+        models.TextSpan(page=1, text="効力発生日：2024年04月30日", bbox=(0.1, 0.45, 0.8, 0.52)),
+        models.TextSpan(page=1, text="総配当金額：1,234,567円", bbox=(0.1, 0.35, 0.8, 0.42)),
+    ]
+    parsed = models.ParsedDocument(pages=[sample_page], tokens=tokens, metadata={})
+    extractor = RuleBasedVoucherExtractor()
+
+    extracted = extractor.extract(parsed, provider=models.ProviderType.CLAUDE)
+
+    assert extracted.company_name.value == "ＡＢＣ株式会社"
+    assert extracted.resolution_date.value == "2024-04-15"
+    assert extracted.dividend_amount.value == "1,234,567"
+    assert any(span.label == "resolution_date" for span in extracted.source_highlights)
+    assert extracted.resolution_date.value != "2024-03-31"

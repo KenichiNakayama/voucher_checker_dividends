@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import models
 from .llm.clients import DummyLLMClient, LLMClientFactory
@@ -26,6 +26,44 @@ DIVIDEND_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NUMERIC_AMOUNT_PATTERN = re.compile(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d+)?|\d+(?:\.\d+)?)")
+
+COMPANY_LABEL_KEYWORDS = (
+    "会社名",
+    "社名",
+    "法人名",
+    "商号",
+    "Company Name",
+    "Corporate Name",
+    "Company",
+)
+
+COMPANY_EXCLUDE_KEYWORDS = (
+    "所在地",
+    "住所",
+    "address",
+)
+
+DATE_LABEL_PRIORITY = [
+    ("配当決議日", "決議日", "取締役会決議日", "Board Resolution Date", "Resolution Date"),
+]
+
+DATE_EXCLUDE_KEYWORDS = (
+    "基準日",
+    "record date",
+    "効力",
+    "支払",
+    "payment",
+    "株主確定日",
+)
+
+AMOUNT_LABEL_KEYWORDS = (
+    "総配当金額",
+    "配当金総額",
+    "配当金額",
+    "支払配当金額",
+    "Total Amount of Dividends",
+    "Total Dividends",
+)
 
 
 class ExtractionError(RuntimeError):
@@ -51,26 +89,37 @@ class RuleBasedVoucherExtractor:
 
         company = self._extract_company(parsed)
         if company:
-            data.company_name = self._field_with_span(company, parsed, label="company_name", confidence=0.85)
+            company_value, company_raw = company
+            data.company_name = self._field_with_span(
+                company_value,
+                parsed,
+                label="company_name",
+                confidence=0.88,
+                raw_text=company_raw,
+            )
             highlights.extend(data.company_name.source_spans)
 
         resolution_date = self._extract_resolution_date(parsed)
         if resolution_date:
+            resolution_value, resolution_raw = resolution_date
             data.resolution_date = self._field_with_span(
-                resolution_date,
+                resolution_value,
                 parsed,
                 label="resolution_date",
-                confidence=0.8,
+                confidence=0.82,
+                raw_text=resolution_raw,
             )
             highlights.extend(data.resolution_date.source_spans)
 
         amount = self._extract_dividend_amount(parsed)
         if amount:
+            amount_value, amount_raw = amount
             data.dividend_amount = self._field_with_span(
-                amount,
+                amount_value,
                 parsed,
                 label="dividend_amount",
-                confidence=0.75,
+                confidence=0.78,
+                raw_text=amount_raw,
             )
             highlights.extend(data.dividend_amount.source_spans)
 
@@ -93,16 +142,26 @@ class RuleBasedVoucherExtractor:
                 return models.FieldValue(value=value, confidence=0.6)
         return models.FieldValue.empty()
 
-    def _extract_company(self, parsed: models.ParsedDocument) -> Optional[str]:
-        lines = list(self._iter_page_lines(parsed))
-        for _, _, text in lines:
-            match = COMPANY_LINE_PATTERN.search(text)
-            if match:
-                return match.group(1).strip().strip("・:：")
+    def _extract_company(self, parsed: models.ParsedDocument) -> Optional[Tuple[str, str]]:
+        lines = self._collect_lines(parsed)
+
+        labeled = self._find_labeled_value(
+            lines,
+            COMPANY_LABEL_KEYWORDS,
+            exclude_keywords=COMPANY_EXCLUDE_KEYWORDS,
+            allow_next_line=True,
+        )
+        if labeled:
+            value, raw = labeled
+            cleaned = self._clean_company_value(value)
+            if cleaned:
+                return cleaned, raw
 
         candidate = self._find_company_candidate_by_proximity(lines)
         if candidate:
-            return candidate
+            cleaned = self._clean_company_value(candidate)
+            if cleaned:
+                return cleaned, candidate
         return None
 
     def _find_company_candidate_by_proximity(self, lines: Sequence[Tuple[int, int, str]]) -> Optional[str]:
@@ -128,38 +187,67 @@ class RuleBasedVoucherExtractor:
                         return candidate
         return None
 
-    def _extract_resolution_date(self, parsed: models.ParsedDocument) -> Optional[str]:
-        lines = list(self._iter_page_lines(parsed))
-        for page_index, _, text in lines:
+    def _extract_resolution_date(self, parsed: models.ParsedDocument) -> Optional[Tuple[str, str]]:
+        lines = self._collect_lines(parsed)
+
+        def _has_valid_date(text: str) -> bool:
+            return self._match_date(text) is not None
+
+        for keyword_group in DATE_LABEL_PRIORITY:
+            labeled = self._find_labeled_value(
+                lines,
+                keyword_group,
+                exclude_keywords=DATE_EXCLUDE_KEYWORDS,
+                allow_next_line=True,
+                value_predicate=_has_valid_date,
+            )
+            if labeled:
+                candidate, raw = labeled
+                normalized = self._match_date(candidate) or self._match_date(raw)
+                if normalized:
+                    return normalized, raw
+
+        for _, _, text in lines:
+            if self._line_contains_keyword(text, DATE_EXCLUDE_KEYWORDS):
+                continue
             normalized = self._match_date(text)
             if not normalized:
                 continue
-            lower = text.lower()
-            if "meeting" in lower or "resolved" in lower or "決議" in lower or "取締役会" in lower:
-                return normalized
+            if self._line_contains_keyword(text, ("決議", "取締役会", "meeting", "resolved")):
+                return normalized, text
 
         for _, _, text in lines:
+            if self._line_contains_keyword(text, DATE_EXCLUDE_KEYWORDS):
+                continue
             normalized = self._match_date(text)
             if normalized:
-                return normalized
+                return normalized, text
         return None
 
-    def _extract_dividend_amount(self, parsed: models.ParsedDocument) -> Optional[str]:
-        for _, _, text in self._iter_page_lines(parsed):
-            match = DIVIDEND_LINE_PATTERN.search(text)
-            if match:
-                amount_candidate = match.group(1)
-                numeric = self._extract_numeric(amount_candidate)
-                if numeric:
-                    return numeric
+    def _extract_dividend_amount(self, parsed: models.ParsedDocument) -> Optional[Tuple[str, str]]:
+        lines = self._collect_lines(parsed)
 
-        for _, _, text in self._iter_page_lines(parsed):
-            lower = text.lower()
-            if "dividend" not in lower and "配当" not in lower:
+        labeled = self._find_labeled_value(
+            lines,
+            AMOUNT_LABEL_KEYWORDS,
+            allow_next_line=True,
+            exclude_keywords=("per share", "per-share", "1株当たり", "１株当たり"),
+            value_predicate=lambda text: self._extract_numeric(text) is not None,
+        )
+        if labeled:
+            candidate, raw = labeled
+            numeric = self._extract_numeric(candidate) or self._extract_numeric(raw)
+            if numeric:
+                return numeric, raw
+
+        for _, _, text in lines:
+            if not self._line_contains_keyword(text, ("配当", "dividend")):
+                continue
+            if self._line_contains_keyword(text, ("per share", "1株当たり", "１株当たり")):
                 continue
             numeric = self._extract_numeric(text)
             if numeric:
-                return numeric
+                return numeric, text
         return None
 
     def _extract_numeric(self, text: str) -> Optional[str]:
@@ -211,8 +299,9 @@ class RuleBasedVoucherExtractor:
         *,
         label: str,
         confidence: float,
+        raw_text: Optional[str] = None,
     ) -> models.FieldValue:
-        span = self._find_span_by_text(parsed, value, label=label)
+        span = self._find_span_by_text(parsed, raw_text or value, label=label)
         if span:
             return models.FieldValue(value=value, confidence=confidence, source_spans=[span])
         return models.FieldValue(value=value, confidence=confidence)
@@ -224,9 +313,14 @@ class RuleBasedVoucherExtractor:
         *,
         label: str,
     ) -> Optional[models.HighlightSpan]:
+        if not needle:
+            return None
         normalized = needle.lower()
         for token in parsed.tokens:
-            if normalized in token.text.lower():
+            token_text = token.text.lower()
+            if normalized in token_text:
+                return self._highlight_from_token(token, label)
+            if normalized.replace(" ", "") and normalized.replace(" ", "") in token_text.replace(" ", ""):
                 return self._highlight_from_token(token, label)
         return None
 
@@ -234,6 +328,90 @@ class RuleBasedVoucherExtractor:
         if token.bbox is None:
             return models.HighlightSpan(page=token.page, bbox=(0.05, 0.75, 0.95, 0.8), label=label)
         return models.HighlightSpan(page=token.page, bbox=token.bbox, label=label)
+
+    def _collect_lines(self, parsed: models.ParsedDocument) -> List[Tuple[int, int, str]]:
+        return list(self._iter_page_lines(parsed))
+
+    def _normalize_delimiters(self, text: str) -> str:
+        normalized = text.replace("：", ":").replace("　", " ").replace("\t", " ")
+        normalized = normalized.replace("‐", "-").replace("―", "-")
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _line_contains_keyword(self, text: str, keywords: Sequence[str]) -> bool:
+        if not keywords:
+            return False
+        normalized = self._normalize_delimiters(text).lower()
+        for keyword in keywords:
+            keyword_normalized = self._normalize_delimiters(keyword).lower()
+            if keyword_normalized and keyword_normalized in normalized:
+                return True
+        return False
+
+    def _extract_segment_after_keyword(
+        self,
+        normalized_text: str,
+        lowered_text: str,
+        keywords: Sequence[str],
+    ) -> str:
+        for keyword in keywords:
+            keyword_normalized = self._normalize_delimiters(keyword)
+            keyword_lower = keyword_normalized.lower()
+            index = lowered_text.find(keyword_lower)
+            if index == -1:
+                continue
+            segment = normalized_text[index + len(keyword_lower) :]
+            segment = segment.lstrip(":：-‐― 　 ")
+            segment = segment.strip()
+            if segment:
+                return segment
+        return ""
+
+    def _find_labeled_value(
+        self,
+        lines: Sequence[Tuple[int, int, str]],
+        keywords: Sequence[str],
+        *,
+        exclude_keywords: Sequence[str] = (),
+        allow_next_line: bool,
+        value_predicate: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Tuple[str, str]]:
+        if not keywords:
+            return None
+
+        for index, (page, _, text) in enumerate(lines):
+            normalized = self._normalize_delimiters(text)
+            lowered = normalized.lower()
+            if not self._line_contains_keyword(text, keywords):
+                continue
+            if self._line_contains_keyword(text, exclude_keywords):
+                continue
+
+            candidate = self._extract_segment_after_keyword(normalized, lowered, keywords)
+            if candidate:
+                candidate = candidate.strip()
+                if not value_predicate or value_predicate(candidate):
+                    return candidate, text
+
+            if allow_next_line and index + 1 < len(lines):
+                next_page, _, next_text = lines[index + 1]
+                if next_page != page:
+                    continue
+                if self._line_contains_keyword(next_text, keywords):
+                    continue
+                candidate_next = next_text.strip()
+                if not candidate_next:
+                    continue
+                if value_predicate and not value_predicate(candidate_next):
+                    continue
+                if self._line_contains_keyword(candidate_next, exclude_keywords):
+                    continue
+                return candidate_next, next_text
+
+        return None
+
+    def _clean_company_value(self, value: str) -> str:
+        cleaned = value.strip().strip("・:：")
+        return cleaned.strip()
 
     def _iter_page_lines(self, parsed: models.ParsedDocument) -> Iterable[Tuple[int, int, str]]:
         for page_index, page in enumerate(parsed.pages, start=1):
