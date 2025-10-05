@@ -1,7 +1,6 @@
 """Streamlit entry point for the voucher checker application."""
 from __future__ import annotations
 
-import os
 from typing import Dict, List, Optional
 
 try:
@@ -14,13 +13,9 @@ from voucher_logic.controller import analyze_voucher
 from voucher_logic.highlight import HighlightRenderer
 from voucher_logic.pdf_ingestor import PdfIngestor
 from voucher_logic.persistence import InMemoryAnalysisStore
-from voucher_logic.validators import VoucherValidator
+from voucher_logic.settings import PROVIDER_ENV_VARS, get_provider_key
 from voucher_logic.ui import build_validation_rows, format_extracted_fields
-
-PROVIDER_KEY_ENV = {
-    models.ProviderType.OPENAI: "OPENAI_API_KEY",
-    models.ProviderType.CLAUDE: "ANTHROPIC_API_KEY",
-}
+from voucher_logic.validators import VoucherValidator
 
 
 def get_session_store() -> InMemoryAnalysisStore:
@@ -44,9 +39,6 @@ def validate_inputs(uploaded_file, provider: models.ProviderType) -> List[str]:
         filename = uploaded_file.name.lower()
         if not filename.endswith(".pdf"):
             errors.append("PDF形式のファイルのみサポートしています。")
-    env_var = PROVIDER_KEY_ENV.get(provider)
-    if env_var and not os.getenv(env_var):
-        errors.append(f"{env_var} が設定されていません。環境変数を確認してください。")
     return errors
 
 
@@ -97,6 +89,20 @@ def main() -> None:
         options=list(models.ProviderType),
         format_func=lambda provider: provider.value.capitalize(),
     )
+
+    provider_key = get_provider_key(provider_label)
+    env_var_name = PROVIDER_ENV_VARS.get(provider_label)
+    if env_var_name:
+        if provider_key:
+            st.sidebar.success(f"{env_var_name} を読み込みました。")
+        else:
+            st.sidebar.info(
+                (
+                    f"{env_var_name} が未設定のため、ルールベース抽出を利用します。"
+                    f"ローカル開発では .envrc に export {env_var_name}=\"...\" を指定し、"
+                    "Streamlit Cloud では App settings > Secrets に同名のキーを追加してください。"
+                )
+            )
 
     uploaded_file = st.file_uploader("バウチャーPDFをアップロード", type=["pdf"])
     analyze_button = st.button("解析を実行する", type="primary")

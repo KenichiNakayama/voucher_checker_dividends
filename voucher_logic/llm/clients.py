@@ -1,10 +1,10 @@
 """LLM client abstractions for voucher extraction."""
 from __future__ import annotations
 
-import os
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict
 
 from .. import models
+from ..settings import get_provider_key
 
 
 class LLMClient:
@@ -79,8 +79,8 @@ class LLMClientFactory:
     @classmethod
     def build_default(cls) -> "LLMClientFactory":
         factory = cls()
-        openai_key = os.getenv("OPENAI_API_KEY")
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        openai_key = get_provider_key(models.ProviderType.OPENAI)
+        anthropic_key = get_provider_key(models.ProviderType.CLAUDE)
 
         if openai_key:
             factory.register(models.ProviderType.OPENAI, lambda: OpenAIClient(openai_key))
