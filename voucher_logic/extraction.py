@@ -9,18 +9,20 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from . import models
 from .llm.clients import DummyLLMClient, LLMClientFactory
 
-TITLE_PATTERN = re.compile(r"^(Dividend\s+Resolution|配当決議.*|Board\s+Resolution.*)$", re.IGNORECASE)
+TITLE_PATTERN = re.compile(r"^(Dividend\s+Resolution|配当決議.*|Board\s+Resolution.*|配当.*報告書)$", re.IGNORECASE)
 COMPANY_LINE_PATTERN = re.compile(
-    r"(?:Company\s*(?:Name)?|会社名|Corporate\s+Name)\s*[:：-]\s*(.+)",
+    r"(?:Company\s*(?:Name)?|会社名|社名|Corporate\s+Name)\s*[:：-]\s*(.+)",
     re.IGNORECASE,
 )
 COMPANY_SUFFIX_PATTERN = re.compile(
     r"\b(?:Inc\.?|Corp\.?|Corporation|Company|Co\.?|Holdings|Limited|Ltd\.?|K\.K\.|LLC|GmbH|Kabushiki\s+Kaisha)\b",
     re.IGNORECASE,
 )
-DATE_PATTERN = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+DATE_PATTERN = re.compile(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b")
+KANJI_DATE_PATTERN = re.compile(r"(20\d{2})年(\d{1,2})月(\d{1,2})日")
+REIWA_DATE_PATTERN = re.compile(r"令和(\d{1,2})年(\d{1,2})月(\d{1,2})日")
 DIVIDEND_LINE_PATTERN = re.compile(
-    r"(?:Total\s+Amount\s+of\s+Dividends|Total\s+Dividends|配当金額)\s*[:：-]?\s*(.+)",
+    r"(?:Total\s+(?:Amount\s+of\s+)?Dividends|配当金額|総配当金額|1株当たり配当金|Dividends\s+per\s+Share)\s*[:：-]?\s*(.+)",
     re.IGNORECASE,
 )
 NUMERIC_AMOUNT_PATTERN = re.compile(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d+)?|\d+(?:\.\d+)?)")
@@ -44,6 +46,8 @@ class RuleBasedVoucherExtractor:
 
         data = models.ExtractedVoucherData.empty()
         data.title = self._extract_title(parsed)
+        if data.title.source_spans:
+            highlights.extend(data.title.source_spans)
 
         company = self._extract_company(parsed)
         if company:
@@ -94,7 +98,7 @@ class RuleBasedVoucherExtractor:
         for _, _, text in lines:
             match = COMPANY_LINE_PATTERN.search(text)
             if match:
-                return match.group(1).strip()
+                return match.group(1).strip().strip("・:：")
 
         candidate = self._find_company_candidate_by_proximity(lines)
         if candidate:
@@ -126,19 +130,18 @@ class RuleBasedVoucherExtractor:
 
     def _extract_resolution_date(self, parsed: models.ParsedDocument) -> Optional[str]:
         lines = list(self._iter_page_lines(parsed))
-        for _, _, text in lines:
-            dates = DATE_PATTERN.findall(text)
-            if not dates:
+        for page_index, _, text in lines:
+            normalized = self._match_date(text)
+            if not normalized:
                 continue
             lower = text.lower()
-            if "meeting" in lower or "resolved" in lower or "決議" in lower:
-                return dates[0]
+            if "meeting" in lower or "resolved" in lower or "決議" in lower or "取締役会" in lower:
+                return normalized
 
-        # fallback: first date encountered
         for _, _, text in lines:
-            dates = DATE_PATTERN.findall(text)
-            if dates:
-                return dates[0]
+            normalized = self._match_date(text)
+            if normalized:
+                return normalized
         return None
 
     def _extract_dividend_amount(self, parsed: models.ParsedDocument) -> Optional[str]:
@@ -151,7 +154,8 @@ class RuleBasedVoucherExtractor:
                     return numeric
 
         for _, _, text in self._iter_page_lines(parsed):
-            if "dividend" not in text.lower():
+            lower = text.lower()
+            if "dividend" not in lower and "配当" not in lower:
                 continue
             numeric = self._extract_numeric(text)
             if numeric:
@@ -159,10 +163,46 @@ class RuleBasedVoucherExtractor:
         return None
 
     def _extract_numeric(self, text: str) -> Optional[str]:
-        match = NUMERIC_AMOUNT_PATTERN.search(text.replace("JPY", "").replace("¥", ""))
-        if not match:
-            return None
-        return match.group(1)
+        normalized = text.replace("JPY", "").replace("¥", "").replace("円", "")
+        match = NUMERIC_AMOUNT_PATTERN.search(normalized)
+        if match:
+            return match.group(1)
+
+        if "億" in text:
+            try:
+                prefix = text.split("億")[0]
+                numeric_match = NUMERIC_AMOUNT_PATTERN.search(prefix.replace(",", ""))
+                if not numeric_match:
+                    return None
+                billions = float(numeric_match.group(1))
+                return f"{int(billions * 100000000):,}"
+            except Exception:
+                return None
+        return None
+
+    def _match_date(self, text: str) -> Optional[str]:
+        iso_match = DATE_PATTERN.search(text)
+        if iso_match:
+            year, month, day = iso_match.groups()
+            return self._format_date_components(int(year), int(month), int(day))
+
+        kanji_match = KANJI_DATE_PATTERN.search(text)
+        if kanji_match:
+            year, month, day = kanji_match.groups()
+            return self._format_date_components(int(year), int(month), int(day))
+
+        reiwa_match = REIWA_DATE_PATTERN.search(text)
+        if reiwa_match:
+            era_year, month, day = map(int, reiwa_match.groups())
+            year = 2018 + era_year
+            return self._format_date_components(year, month, day)
+        return None
+
+    def _format_date_components(self, year: int, month: int, day: int) -> str:
+        try:
+            return datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return f"{year:04d}-{month:02d}-{day:02d}"
 
     def _field_with_span(
         self,

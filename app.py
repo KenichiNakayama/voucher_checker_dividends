@@ -58,45 +58,69 @@ def render_results(result: models.VoucherAnalysisResult) -> None:
     fail_count = sum(1 for status in requirements.values() if status.status is models.RequirementState.FAIL)
     pending_count = total_checks - pass_count - fail_count
 
-    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='voucher-section-title'>検証サマリー</div>", unsafe_allow_html=True)
-    summary_cols = st.columns(3)
-    summary_cols[0].metric("チェック数", total_checks)
-    summary_cols[1].metric("合格", pass_count)
-    summary_cols[2].metric("要確認", fail_count + pending_count)
-
-    if result.warnings:
-        chips = "".join(
-            f"<span class='voucher-chip warning'>{warning}</span>" for warning in result.warnings
-        )
-        st.markdown(chips, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='voucher-section-title'>検証結果</div>", unsafe_allow_html=True)
-    if validation_rows:
-        st.dataframe(validation_rows, use_container_width=True)
-    else:
-        st.info("検証結果はまだありません。")
-    st.markdown("</div>", unsafe_allow_html=True)
-
     extracted_entries = format_extracted_fields(result.extracted)
-    st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='voucher-section-title'>抽出情報</div>", unsafe_allow_html=True)
-    if extracted_entries:
-        st.dataframe(extracted_entries, use_container_width=True)
-    else:
-        st.info("抽出された情報はありません。")
 
-    if result.highlight_pdf:
-        st.download_button(
-            label="ハイライト付きPDFをダウンロード",
-            data=result.highlight_pdf,
-            file_name="voucher_highlight.pdf",
-            mime="application/pdf",
-            type="secondary",
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
+    summary_tab, detail_tab, document_tab = st.tabs(["サマリー", "抽出結果", "原本プレビュー"])
+
+    with summary_tab:
+        st.markdown("<div class='voucher-card compact'>", unsafe_allow_html=True)
+        st.markdown("<div class='voucher-section-title'>検証サマリー</div>", unsafe_allow_html=True)
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("チェック数", total_checks)
+        metric_cols[1].metric("合格", pass_count)
+        metric_cols[2].metric("要確認", fail_count + pending_count)
+        completion_ratio = 0 if total_checks == 0 else pass_count / total_checks
+        metric_cols[3].metric("達成率", f"{completion_ratio * 100:.0f}%")
+
+        if result.warnings:
+            chips = "".join(
+                f"<span class='voucher-chip warning'>{warning}</span>" for warning in result.warnings
+            )
+            st.markdown(f"<div class='voucher-chip-row'>{chips}</div>", unsafe_allow_html=True)
+
+        if validation_rows:
+            st.dataframe(validation_rows, use_container_width=True)
+        else:
+            st.info("検証結果はまだありません。")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with detail_tab:
+        st.markdown("<div class='voucher-card compact'>", unsafe_allow_html=True)
+        st.markdown("<div class='voucher-section-title'>抽出結果</div>", unsafe_allow_html=True)
+        if extracted_entries:
+            for chunk_start in range(0, len(extracted_entries), 3):
+                cols = st.columns(3)
+                for col, entry in zip(cols, extracted_entries[chunk_start : chunk_start + 3]):
+                    with col:
+                        st.markdown(
+                            f"<div class='voucher-pill'><span class='label'>{entry['label']}</span>"
+                            f"<span class='value'>{entry['value'] or '―'}</span>"
+                            f"<span class='confidence'>Conf. {entry['confidence']}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+        else:
+            st.info("抽出された情報はありません。")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with document_tab:
+        st.markdown("<div class='voucher-card compact'>", unsafe_allow_html=True)
+        st.markdown("<div class='voucher-section-title'>原本ダウンロード</div>", unsafe_allow_html=True)
+        if result.highlight_pdf:
+            st.download_button(
+                label="ハイライト付きPDFをダウンロード",
+                data=result.highlight_pdf,
+                file_name="voucher_highlight.pdf",
+                mime="application/pdf",
+                type="primary",
+            )
+        else:
+            st.info("ハイライト対象がないため原本をそのまま返却しています。")
+
+        with st.expander("解析テキストビュー", expanded=False):
+            for page_number, page in enumerate(result.parsed_document.pages, start=1):
+                st.markdown(f"<div class='voucher-page-label'>Page {page_number}</div>", unsafe_allow_html=True)
+                st.code(page or "", language="text")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -105,47 +129,112 @@ def main() -> None:
     st.markdown(
         """
         <style>
+        .main .block-container {
+            padding-top: 2.5rem;
+            max-width: 1200px;
+        }
         .voucher-card {
-            background: linear-gradient(145deg, rgba(23,28,38,0.95), rgba(16,20,27,0.95));
+            background: rgba(19, 25, 36, 0.9);
             border-radius: 18px;
             padding: 1.6rem 1.8rem;
             margin-bottom: 1.8rem;
-            border: 1px solid rgba(255,255,255,0.04);
-            box-shadow: 0 24px 48px rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.06);
+            box-shadow: 0 28px 60px rgba(12, 18, 28, 0.45);
+            backdrop-filter: blur(18px);
+        }
+        .voucher-card.compact {
+            padding: 1.4rem 1.6rem;
         }
         .voucher-chip {
             display: inline-flex;
             align-items: center;
-            padding: 0.3rem 0.8rem;
+            padding: 0.35rem 0.85rem;
             border-radius: 999px;
-            background: rgba(148, 189, 255, 0.16);
-            color: #9ecbff;
-            font-size: 0.85rem;
+            background: rgba(95, 165, 255, 0.16);
+            color: #a8d4ff;
+            font-size: 0.8rem;
             margin-right: 0.6rem;
             margin-bottom: 0.4rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
         .voucher-chip.warning {
-            background: rgba(255, 193, 7, 0.16);
-            color: #ffda6a;
+            background: rgba(255, 193, 7, 0.18);
+            color: #ffd666;
         }
-        .voucher-chip.error {
-            background: rgba(255, 82, 82, 0.18);
-            color: #ff9a9a;
+        .voucher-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            margin-top: 0.8rem;
+            margin-bottom: 0.6rem;
         }
         .voucher-section-title {
-            font-size: 1.05rem;
+            font-size: 1.1rem;
             font-weight: 600;
-            margin-bottom: 0.8rem;
-            letter-spacing: 0.03em;
+            margin-bottom: 1rem;
+            letter-spacing: 0.04em;
         }
-        .css-1xarl3l, .stDataFrame { font-size: 0.9rem; }
+        .voucher-pill {
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 0.9rem 1rem;
+            margin-bottom: 1rem;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        .voucher-pill .label {
+            display: block;
+            font-size: 0.75rem;
+            letter-spacing: 0.06em;
+            color: rgba(255,255,255,0.55);
+            text-transform: uppercase;
+            margin-bottom: 0.35rem;
+        }
+        .voucher-pill .value {
+            display: block;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #f5f7fb;
+        }
+        .voucher-pill .confidence {
+            display: block;
+            font-size: 0.75rem;
+            color: rgba(255,255,255,0.45);
+            margin-top: 0.25rem;
+        }
+        .voucher-page-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            color: rgba(255,255,255,0.45);
+            margin-top: 1rem;
+            margin-bottom: 0.3rem;
+            letter-spacing: 0.08em;
+        }
+        .stTabs [role="tab"] {
+            background: rgba(15,20,30,0.7);
+            border-radius: 12px 12px 0 0;
+            padding: 0.7rem 1.2rem;
+            border: none;
+            color: rgba(255,255,255,0.6);
+        }
+        .stTabs [role="tab"][aria-selected="true"] {
+            background: rgba(47, 128, 237, 0.18);
+            color: #e2efff;
+            border-bottom: 2px solid rgba(47, 128, 237, 0.65);
+        }
+        .stTabs [role="tab"]:focus {
+            outline: none;
+            box-shadow: none;
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.75rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.title("配当バウチャー検証ダッシュボード")
-    st.caption("配当バウチャーから重要項目を抽出し、ビジネス意思決定を支援します。")
+    st.title("配当バウチャーAIアシスタント")
+    st.caption("原本から重要項目を抽出し、合議前のファクトチェックをスピードアップします。")
 
     st.sidebar.header("設定")
     provider_label = st.sidebar.selectbox(
@@ -167,6 +256,9 @@ def main() -> None:
                     "Streamlit Cloud では App settings > Secrets に同名のキーを追加してください。"
                 )
             )
+
+    st.sidebar.markdown("---")
+    st.sidebar.metric("最新の合格数", st.session_state.get("analysis_result", models.VoucherAnalysisResult()).validation.overall_status.value.upper())
 
     with st.container():
         st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)

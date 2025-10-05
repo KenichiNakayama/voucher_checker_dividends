@@ -1,10 +1,23 @@
+import importlib.util
+
+import pytest
+
 from voucher_logic import models
 from voucher_logic.highlight import HighlightRenderer
 
 
 def test_highlight_renderer_creates_visual_pdf():
+    if importlib.util.find_spec("fitz") is None:
+        pytest.skip("PyMuPDF not available")
+
+    import fitz  # type: ignore
+
     renderer = HighlightRenderer()
-    original_pdf = b"%PDF-1.4\nOriginal"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((80, 550), "Highlighted line")
+    original_pdf = doc.tobytes(deflate=True)
+    doc.close()
     parsed = models.ParsedDocument(
         pages=["Line one\nHighlighted line"],
         tokens=[
@@ -16,7 +29,8 @@ def test_highlight_renderer_creates_visual_pdf():
     output = renderer.render(original_pdf, spans, parsed_document=parsed)
 
     assert output.startswith(b"%PDF")
-    assert b"Span" not in output  # ensure we no longer emit textual summary
+    assert b"Annots" in output
+    assert output != original_pdf
 
 
 def test_highlight_renderer_returns_original_when_no_spans():

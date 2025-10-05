@@ -7,7 +7,7 @@ from . import models
 
 
 class _SimplePDFBuilder:
-    """Builds a lightweight PDF with highlighted text rows."""
+    """Fallback PDF builder used when native annotations are unavailable."""
 
     def __init__(self, *, width: float = 595.0, height: float = 842.0, margin: float = 48.0, font_size: float = 12.0) -> None:
         self._width = width
@@ -38,7 +38,7 @@ class _SimplePDFBuilder:
         page_object_ids: List[int] = []
         page_contents: List[Tuple[int, str]] = []
 
-        for page_number, (lines, highlights) in enumerate(self._pages, start=1):
+        for lines, highlights in self._pages:
             content = self._build_page_content(lines, highlights)
             content_id = obj_index
             obj_index += 1
@@ -58,11 +58,9 @@ class _SimplePDFBuilder:
         )
         objects.insert(1, (pages_id, pages_dict))
 
-        # Append stream objects after structural ones
         for content_id, payload in page_contents:
             objects.append((content_id, payload))
 
-        # Assemble PDF with xref
         body_parts: List[str] = ["%PDF-1.4"]
         offsets: Dict[int, int] = {}
         current_offset = len("%PDF-1.4\n")
@@ -71,7 +69,7 @@ class _SimplePDFBuilder:
             offsets[obj_id] = current_offset
             encoded = obj_header.encode("utf-8")
             body_parts.append(obj_header)
-            current_offset += len(encoded) + 1  # account for newline join
+            current_offset += len(encoded) + 1
 
         xref_start = current_offset
         max_obj = max(offsets)
@@ -99,7 +97,6 @@ class _SimplePDFBuilder:
         usable_width = self._width - 2 * self._margin
         usable_height = self._height - 2 * self._margin
 
-        # Draw highlight rectangles first so text stays on top
         for x0, y0, x1, y1 in highlights:
             absolute_x0 = self._margin + usable_width * max(min(x0, 1.0), 0.0)
             absolute_x1 = self._margin + usable_width * max(min(x1, 1.0), 0.0)
@@ -110,7 +107,7 @@ class _SimplePDFBuilder:
             commands.extend(
                 [
                     "q",
-                    "1 1 0 rg",  # Yellow fill
+                    "1 0.93 0 rg",
                     f"{absolute_x0:.2f} {absolute_y0:.2f} {width:.2f} {height:.2f} re f",
                     "Q",
                 ]
@@ -136,6 +133,14 @@ class _SimplePDFBuilder:
 class HighlightRenderer:
     """Produces a downloadable PDF containing visual highlight cues."""
 
+    def __init__(self) -> None:
+        try:
+            import fitz  # type: ignore
+        except Exception:  # pragma: no cover - dependency optional during tests
+            self._fitz = None
+        else:
+            self._fitz = fitz
+
     def render(
         self,
         original_pdf: bytes,
@@ -148,20 +153,66 @@ class HighlightRenderer:
         if parsed_document is None or not parsed_document.pages:
             return original_pdf
 
-        builder = _SimplePDFBuilder()
+        if self._fitz is not None:
+            try:
+                return self._render_with_annotations(original_pdf, spans)
+            except Exception:
+                pass
 
+        return self._render_with_fallback(parsed_document, spans)
+
+    def _render_with_annotations(
+        self,
+        original_pdf: bytes,
+        spans: Sequence[models.HighlightSpan],
+    ) -> bytes:
+        doc = self._fitz.open(stream=original_pdf, filetype="pdf")  # type: ignore[operator]
+        for span in spans:
+            if not span.bbox:
+                continue
+            page_index = span.page - 1
+            if page_index < 0 or page_index >= len(doc):
+                continue
+            page = doc[page_index]
+            rect = self._denormalize_bbox(span.bbox, page.rect.width, page.rect.height)
+            annot = page.add_rect_annot(rect)
+            annot.set_colors(stroke=(0.95, 0.76, 0.2), fill=(1.0, 0.93, 0.62))
+            annot.set_border(width=1.0)
+            annot.set_opacity(0.35)
+            if span.label:
+                annot.set_info(content=span.label)
+            annot.update()
+        output = doc.tobytes(deflate=True, garbage=4)
+        doc.close()
+        return output
+
+    def _render_with_fallback(
+        self,
+        parsed_document: models.ParsedDocument,
+        spans: Sequence[models.HighlightSpan],
+    ) -> bytes:
+        builder = _SimplePDFBuilder()
         span_map: Dict[int, List[models.HighlightSpan]] = {}
         for span in spans:
             span_map.setdefault(span.page, []).append(span)
 
-        page_count = len(parsed_document.pages)
-        for page_number in range(1, page_count + 1):
-            page_text = parsed_document.pages[page_number - 1]
+        for page_number, page_text in enumerate(parsed_document.pages, start=1):
             lines = [line for line in page_text.splitlines()]
             highlight_rects = [span.bbox for span in span_map.get(page_number, []) if span.bbox]
             builder.add_page(lines, highlight_rects)
-
         return builder.build()
+
+    def _denormalize_bbox(self, bbox: Tuple[float, float, float, float], width: float, height: float):
+        clamp = lambda value: max(0.0, min(1.0, value))
+        x0 = clamp(bbox[0]) * width
+        x1 = clamp(bbox[2]) * width
+        y0 = height * (1.0 - clamp(bbox[3]))
+        y1 = height * (1.0 - clamp(bbox[1]))
+        if y1 <= y0:
+            y1 = min(height, y0 + 12.0)
+        if x1 <= x0:
+            x1 = min(width, x0 + 12.0)
+        return self._fitz.Rect(x0, y0, x1, y1)  # type: ignore[union-attr]
 
 
 __all__ = ["HighlightRenderer"]

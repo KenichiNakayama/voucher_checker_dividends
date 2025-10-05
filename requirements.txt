@@ -1,0 +1,6 @@
+streamlit>=1.33.0
+pymupdf>=1.23.0
+pdfplumber>=0.11.0
+pypdf>=4.2.0
+pytest>=8.2.0
+pytest-cov>=4.1.0

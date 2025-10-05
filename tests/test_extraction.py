@@ -10,14 +10,19 @@ Amount: 1,000,000
 
 
 def test_rule_based_extractor_detects_fields():
-    parsed = models.ParsedDocument(pages=[SAMPLE_TEXT], tokens=[], metadata={})
+    tokens = [
+        models.TextSpan(page=1, text="Company: ACME Holdings", bbox=(0.1, 0.65, 0.9, 0.72)),
+        models.TextSpan(page=1, text="Date: 2024-01-01", bbox=(0.1, 0.55, 0.9, 0.62)),
+        models.TextSpan(page=1, text="Amount: 1,000,000", bbox=(0.1, 0.45, 0.9, 0.52)),
+    ]
+    parsed = models.ParsedDocument(pages=[SAMPLE_TEXT], tokens=tokens, metadata={})
     extractor = RuleBasedVoucherExtractor()
 
     extracted = extractor.extract(parsed, provider=models.ProviderType.OPENAI)
 
     assert extracted.company_name.value == "ACME Holdings"
     assert extracted.dividend_amount.value == "1,000,000"
-    assert any(span.label == "company" for span in extracted.source_highlights)
+    assert any(span.label == "company_name" for span in extracted.source_highlights)
 
 
 def test_rule_based_extractor_handles_missing_values():
@@ -39,7 +44,20 @@ def test_rule_based_extractor_handles_realistic_document():
         "At the meeting of the Board of Directors held on 2025-03-30, the Company resolved to distribute dividends.\n"
         "Total Amount of Dividends: JPY 36,000,000 (JPY 18 per share x 2,000,000 shares)\n"
     )
-    parsed = models.ParsedDocument(pages=[sample_page], tokens=[], metadata={})
+    tokens = [
+        models.TextSpan(page=1, text="Acme Holdings K.K.", bbox=(0.2, 0.74, 0.82, 0.80)),
+        models.TextSpan(
+            page=1,
+            text="At the meeting of the Board of Directors held on 2025-03-30",
+            bbox=(0.1, 0.48, 0.92, 0.56),
+        ),
+        models.TextSpan(
+            page=1,
+            text="Total Amount of Dividends: JPY 36,000,000",
+            bbox=(0.1, 0.38, 0.92, 0.45),
+        ),
+    ]
+    parsed = models.ParsedDocument(pages=[sample_page], tokens=tokens, metadata={})
     extractor = RuleBasedVoucherExtractor()
 
     extracted = extractor.extract(parsed, provider=models.ProviderType.OPENAI)

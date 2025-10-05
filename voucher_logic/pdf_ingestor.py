@@ -4,7 +4,8 @@ from __future__ import annotations
 import io
 import re
 import zlib
-from typing import Dict, Iterable, List, Tuple
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from . import models
 
@@ -15,6 +16,12 @@ _CONTENTS_ARRAY_RE = re.compile(rb"/Contents\s+\[(.*?)\]", re.DOTALL)
 _INDIRECT_REF_RE = re.compile(rb"(\d+)\s+\d+\s+R")
 
 
+@dataclass
+class _PageExtraction:
+    text: str
+    spans: List[models.TextSpan]
+
+
 class PdfIngestor:
     """Parses PDF bytes into the internal ParsedDocument representation."""
 
@@ -22,38 +29,182 @@ class PdfIngestor:
         if not file_bytes:
             raise ValueError("Empty file provided")
 
-        if file_bytes.lstrip().startswith(b"%PDF"):
-            pages = self._extract_pdf_pages(file_bytes)
-        else:
-            pages = [self._decode_text(file_bytes)]
+        if not file_bytes.lstrip().startswith(b"%PDF"):
+            text = file_bytes.decode("utf-8", errors="ignore")
+            return models.ParsedDocument(pages=[text], tokens=[], metadata={"page_count": 1})
+
+        extraction = self._extract_with_pymupdf(file_bytes)
+        if extraction is None:
+            extraction = self._extract_with_pdfplumber(file_bytes)
+
+        if extraction is None:
+            extraction = self._extract_with_fallback(file_bytes)
+
+        pages = [page.text for page in extraction]
+        tokens: List[models.TextSpan] = []
+        for page in extraction:
+            tokens.extend(page.spans)
 
         if not pages:
             raise ValueError("PDF parsing produced no pages")
 
-        tokens: List[models.TextSpan] = []
         metadata = {"page_count": len(pages)}
-        for page_index, content in enumerate(pages, start=1):
-            lines = content.splitlines()
-            visible_lines = [line for line in lines if line.strip()]
-            visible_count = len(visible_lines) or 1
+        return models.ParsedDocument(pages=pages, tokens=tokens, metadata=metadata)
+
+    def _extract_with_pymupdf(self, file_bytes: bytes) -> Optional[List[_PageExtraction]]:
+        try:
+            import fitz  # type: ignore
+        except Exception:  # pragma: no cover - dependency optional during tests
+            return None
+
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+        except Exception:
+            return None
+
+        pages: List[_PageExtraction] = []
+        for page_index, page in enumerate(doc, start=1):
+            text = page.get_text("text") or ""
+            spans: List[models.TextSpan] = []
+            words = page.get_text("words") or []
+            if words:
+                spans.extend(self._words_to_spans(words, page, page_index))
+            else:
+                blocks = page.get_text("blocks") or []
+                spans.extend(self._blocks_to_spans(blocks, page, page_index))
+            pages.append(_PageExtraction(text=text, spans=spans))
+        return pages
+
+    def _extract_with_pdfplumber(self, file_bytes: bytes) -> Optional[List[_PageExtraction]]:
+        try:
+            import pdfplumber  # type: ignore
+        except Exception:  # pragma: no cover - dependency optional during tests
+            return None
+
+        try:
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                pages: List[_PageExtraction] = []
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ""
+                    spans: List[models.TextSpan] = []
+                    for block in page.extract_words():
+                        spans.append(
+                            models.TextSpan(
+                                page=page_index,
+                                text=block.get("text", ""),
+                                bbox=self._normalize_bbox(
+                                    float(block["x0"]),
+                                    float(block["top"]),
+                                    float(block["x1"]),
+                                    float(block["bottom"]),
+                                    float(page.width),
+                                    float(page.height),
+                                ),
+                            )
+                        )
+                    pages.append(_PageExtraction(text=text, spans=spans))
+        except Exception:
+            return None
+
+        if not pages:
+            return None
+        return pages
+
+    def _extract_with_fallback(self, file_bytes: bytes) -> List[_PageExtraction]:
+        pages = self._extract_pdf_pages(file_bytes)
+        spans: List[_PageExtraction] = []
+        for page_index, text in enumerate(pages, start=1):
+            line_spans: List[models.TextSpan] = []
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            visible_count = len(lines) or 1
             step = 1.0 / (visible_count + 1)
-            visible_index = 0
-            for raw_line in lines:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                visible_index += 1
-                top = 1.0 - visible_index * step
-                bottom = max(top - step * 0.9, 0.0)
-                tokens.append(
+            for line_index, line in enumerate(lines, start=1):
+                top = 1.0 - line_index * step
+                bottom = max(top - step * 0.85, 0.0)
+                line_spans.append(
                     models.TextSpan(
                         page=page_index,
                         text=line,
                         bbox=(0.08, bottom, 0.92, max(top, bottom + 0.02)),
                     )
                 )
+            spans.append(_PageExtraction(text=text, spans=line_spans))
+        return spans
 
-        return models.ParsedDocument(pages=pages, tokens=tokens, metadata=metadata)
+    def _words_to_spans(
+        self,
+        words: Iterable[Tuple[float, ...]],
+        page,
+        page_index: int,
+    ) -> List[models.TextSpan]:
+        spans: List[models.TextSpan] = []
+        grouped: Dict[Tuple[int, int], List[Tuple[float, ...]]] = {}
+        for word in words:
+            if len(word) < 8:
+                continue
+            key = (int(word[5]), int(word[6]))
+            grouped.setdefault(key, []).append(word)
+
+        for entries in grouped.values():
+            entries.sort(key=lambda item: item[7] if len(item) > 7 else 0)
+            text = " ".join(str(entry[4]) for entry in entries if len(entry) > 4 and entry[4])
+            if not text:
+                continue
+            x0 = min(float(entry[0]) for entry in entries)
+            y0 = min(float(entry[1]) for entry in entries)
+            x1 = max(float(entry[2]) for entry in entries)
+            y1 = max(float(entry[3]) for entry in entries)
+            spans.append(
+                models.TextSpan(
+                    page=page_index,
+                    text=text,
+                    bbox=self._normalize_bbox(x0, y0, x1, y1, page.rect.width, page.rect.height),
+                )
+            )
+        return spans
+
+    def _blocks_to_spans(self, blocks: Iterable[Tuple[float, float, float, float, str]], page, page_index: int) -> List[models.TextSpan]:
+        spans: List[models.TextSpan] = []
+        for block in blocks:
+            if len(block) < 5:
+                continue
+            text = block[4].strip()
+            if not text:
+                continue
+            spans.append(
+                models.TextSpan(
+                    page=page_index,
+                    text=text,
+                    bbox=self._normalize_bbox(block[0], block[1], block[2], block[3], page.rect.width, page.rect.height),
+                )
+            )
+        return spans
+
+    def _normalize_bbox(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        width: float,
+        height: float,
+    ) -> Tuple[float, float, float, float]:
+        if width <= 0 or height <= 0:
+            return (0.05, 0.05, 0.95, 0.15)
+
+        def clamp(value: float) -> float:
+            return max(0.0, min(1.0, value))
+
+        nx0 = clamp(x0 / width)
+        nx1 = clamp(x1 / width)
+        # Convert top-origin coordinates to bottom-origin for consistency
+        ny0 = clamp(1.0 - (y1 / height))
+        ny1 = clamp(1.0 - (y0 / height))
+        if ny1 <= ny0:
+            ny1 = clamp(ny0 + 0.02)
+        if nx1 <= nx0:
+            nx1 = clamp(nx0 + 0.02)
+        return (nx0, ny0, nx1, ny1)
 
     def _extract_pdf_pages(self, file_bytes: bytes) -> List[str]:
         pages = self._extract_with_pypdf(file_bytes)
@@ -88,7 +239,7 @@ class PdfIngestor:
             return [decoded]
 
         pages: List[str] = []
-        for object_id, raw in objects.items():
+        for raw in objects.values():
             if b"/Type" not in raw or b"/Page" not in raw:
                 continue
             content_object_ids = self._resolve_contents_ids(raw)
