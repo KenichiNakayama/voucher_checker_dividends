@@ -95,3 +95,26 @@ def test_rule_based_extractor_handles_japanese_labels_and_dates():
     assert extracted.dividend_amount.value == "1,234,567"
     assert any(span.label == "resolution_date" for span in extracted.source_highlights)
     assert extracted.resolution_date.value != "2024-03-31"
+
+
+def test_rule_based_extractor_handles_english_suffix_without_label():
+    sample_page = (
+        "Dividend Resolution\n"
+        "XYZ Holdings Co., Ltd.\n"
+        "Address: 1 Infinite Loop\n"
+        "Resolution Date: 2024-06-12\n"
+        "Total Amount of Dividends: 2,500,000\n"
+    )
+    tokens = [
+        models.TextSpan(page=1, text="XYZ Holdings Co., Ltd.", bbox=(0.1, 0.75, 0.9, 0.82)),
+        models.TextSpan(page=1, text="Resolution Date: 2024-06-12", bbox=(0.1, 0.6, 0.9, 0.67)),
+        models.TextSpan(page=1, text="Total Amount of Dividends: 2,500,000", bbox=(0.1, 0.5, 0.9, 0.57)),
+    ]
+    parsed = models.ParsedDocument(pages=[sample_page], tokens=tokens, metadata={})
+    extractor = RuleBasedVoucherExtractor()
+
+    extracted = extractor.extract(parsed, provider=models.ProviderType.OPENAI)
+
+    assert extracted.company_name.value == "XYZ Holdings Co., Ltd."
+    assert extracted.resolution_date.value == "2024-06-12"
+    assert extracted.dividend_amount.value == "2,500,000"

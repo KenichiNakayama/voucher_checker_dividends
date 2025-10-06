@@ -234,7 +234,7 @@ def main() -> None:
     )
 
     st.title("配当バウチャーAIアシスタント")
-    st.caption("原本から重要項目を抽出し、合議前のファクトチェックをスピードアップします。")
+    st.caption("配当決議書から重要項目を抽出し、証票確認をサポートします。")
 
     st.sidebar.header("設定")
     provider_label = st.sidebar.selectbox(
@@ -260,11 +260,27 @@ def main() -> None:
     st.sidebar.markdown("---")
     st.sidebar.metric("最新の合格数", st.session_state.get("analysis_result", models.VoucherAnalysisResult()).validation.overall_status.value.upper())
 
+    if "uploader_key" not in st.session_state:
+        st.session_state["uploader_key"] = 0
+
     with st.container():
         st.markdown("<div class='voucher-card'>", unsafe_allow_html=True)
-        uploaded_file = st.file_uploader("バウチャーPDFをアップロード", type=["pdf"])
-        analyze_button = st.button("解析を実行する", type="primary")
+        upload_key = f"voucher_upload_{st.session_state['uploader_key']}"
+        uploaded_file = st.file_uploader("バウチャーPDFをアップロード", type=["pdf"], key=upload_key)
+        action_cols = st.columns([1, 1, 6])
+        analyze_button = action_cols[0].button("解析を実行する", type="primary")
+        refresh_button = action_cols[1].button("リフレッシュ", type="secondary")
+        action_cols[2].write("")
         st.markdown("</div>", unsafe_allow_html=True)
+
+    if refresh_button:
+        if "analysis_result" in st.session_state:
+            st.session_state.pop("analysis_result", None)
+        if "analysis_store" in st.session_state:
+            store = st.session_state["analysis_store"]
+            store.clear()
+        st.session_state["uploader_key"] += 1
+        st.experimental_rerun()
 
     if analyze_button:
         errors = validate_inputs(uploaded_file, provider_label)

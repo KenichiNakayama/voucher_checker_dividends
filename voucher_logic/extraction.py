@@ -15,7 +15,7 @@ COMPANY_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 COMPANY_SUFFIX_PATTERN = re.compile(
-    r"\b(?:Inc\.?|Corp\.?|Corporation|Company|Co\.?|Holdings|Limited|Ltd\.?|K\.K\.|LLC|GmbH|Kabushiki\s+Kaisha)\b",
+    r"(?:Inc\.?|Corp\.?|Corporation|Company|Co\.?|Holdings|Limited|Ltd\.?|K\.K\.|LLC|GmbH|Kabushiki\s+Kaisha|株式会社|有限会社|合同会社|\(株\)|（株）|㈱)",
     re.IGNORECASE,
 )
 DATE_PATTERN = re.compile(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b")
@@ -32,6 +32,8 @@ COMPANY_LABEL_KEYWORDS = (
     "社名",
     "法人名",
     "商号",
+    "株式会社",
+    "(株)",
     "Company Name",
     "Corporate Name",
     "Company",
@@ -184,6 +186,13 @@ class RuleBasedVoucherExtractor:
                         continue
                     candidate = lines[idx - back][2].strip()
                     if candidate and not candidate.lower().startswith("address"):
+                        return candidate
+            if "所在地" in text or "住所" in text:
+                for back in range(1, 4):
+                    if idx - back < 0:
+                        continue
+                    candidate = lines[idx - back][2].strip()
+                    if candidate and "所在地" not in candidate and "住所" not in candidate:
                         return candidate
         return None
 
@@ -411,6 +420,11 @@ class RuleBasedVoucherExtractor:
 
     def _clean_company_value(self, value: str) -> str:
         cleaned = value.strip().strip("・:：")
+        cleaned = cleaned.replace("株式會社", "株式会社")
+        cleaned = re.sub(r"[（(]?\s*\(株\)\s*[）)]?", "株式会社", cleaned)
+        cleaned = re.sub(r"株式会社\s+", "株式会社", cleaned)
+        cleaned = re.sub(r"\s+株式会社", "株式会社", cleaned)
+        cleaned = re.sub(r"株式?会社", "株式会社", cleaned)
         return cleaned.strip()
 
     def _iter_page_lines(self, parsed: models.ParsedDocument) -> Iterable[Tuple[int, int, str]]:
