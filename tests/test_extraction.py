@@ -90,7 +90,7 @@ def test_rule_based_extractor_handles_japanese_labels_and_dates():
 
     extracted = extractor.extract(parsed, provider=models.ProviderType.CLAUDE)
 
-    assert extracted.company_name.value == "ＡＢＣ株式会社"
+    assert extracted.company_name.value == "ABC株式会社"
     assert extracted.resolution_date.value == "2024-04-15"
     assert extracted.dividend_amount.value == "1,234,567"
     assert any(span.label == "resolution_date" for span in extracted.source_highlights)
@@ -118,3 +118,25 @@ def test_rule_based_extractor_handles_english_suffix_without_label():
     assert extracted.company_name.value == "XYZ Holdings Co., Ltd."
     assert extracted.resolution_date.value == "2024-06-12"
     assert extracted.dividend_amount.value == "2,500,000"
+
+
+def test_rule_based_extractor_ignores_sentence_with_verbs_for_company():
+    sample_page = (
+        "Dividend Resolution\n"
+        "At the meeting of the Board of Directors held on 2024-05-01, the Company resolved to distribute dividends.\n"
+        "ABC Co., Ltd.\n"
+    )
+    tokens = [
+        models.TextSpan(
+            page=1,
+            text="At the meeting of the Board of Directors held on 2024-05-01, the Company resolved to distribute dividends.",
+            bbox=(0.1, 0.6, 0.9, 0.7),
+        ),
+        models.TextSpan(page=1, text="ABC Co., Ltd.", bbox=(0.1, 0.5, 0.9, 0.58)),
+    ]
+    parsed = models.ParsedDocument(pages=[sample_page], tokens=tokens, metadata={})
+    extractor = RuleBasedVoucherExtractor()
+
+    extracted = extractor.extract(parsed, provider=models.ProviderType.OPENAI)
+
+    assert extracted.company_name.value == "ABC Co., Ltd."

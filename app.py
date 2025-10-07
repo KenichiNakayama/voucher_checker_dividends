@@ -274,13 +274,11 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     if refresh_button:
-        if "analysis_result" in st.session_state:
-            st.session_state.pop("analysis_result", None)
+        st.session_state.pop("analysis_result", None)
         if "analysis_store" in st.session_state:
-            store = st.session_state["analysis_store"]
-            store.clear()
+            st.session_state["analysis_store"].clear()
         st.session_state["uploader_key"] += 1
-        st.experimental_rerun()
+        st.session_state["pending_refresh"] = True
 
     if analyze_button:
         errors = validate_inputs(uploaded_file, provider_label)
@@ -306,6 +304,9 @@ def main() -> None:
         render_results(st.session_state["analysis_result"])
     else:
         st.info("PDFをアップロードして解析を実行してください。")
+
+    if st.session_state.pop("pending_refresh", False):
+        st.rerun()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution

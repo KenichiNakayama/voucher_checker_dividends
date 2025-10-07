@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 from . import models
 from .llm.clients import DummyLLMClient, LLMClientFactory
@@ -26,6 +27,83 @@ DIVIDEND_LINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NUMERIC_AMOUNT_PATTERN = re.compile(r"([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d+)?|\d+(?:\.\d+)?)")
+
+JP_COMPANY_KEYWORDS = (
+    "株式会社",
+    "有限会社",
+    "合同会社",
+    "学校法人",
+    "医療法人",
+    "(株)",
+    "（株）",
+    "㈱",
+    "(有)",
+    "（有）",
+)
+
+EN_COMPANY_KEYWORDS = (
+    "co.",
+    "co",
+    "co., ltd",
+    "co., ltd.",
+    "co ltd",
+    "company",
+    "corp",
+    "corp.",
+    "corporation",
+    "inc",
+    "inc.",
+    "limited",
+    "ltd",
+    "ltd.",
+    "holdings",
+    "group",
+    "llc",
+    "plc",
+    "gmbh",
+    "s.a.",
+    "s.p.a.",
+    "pte ltd",
+    "pty ltd",
+    "ag",
+    "bv",
+    "nv",
+)
+
+COMPANY_INVALID_TERMS = (
+    "resolved",
+    "resolve",
+    "resolves",
+    "approved",
+    "approve",
+    "approves",
+    "decided",
+    "decide",
+    "distribute",
+    "distributing",
+    "distributed",
+    "dividend",
+    "meeting",
+    "board",
+    "directors",
+    "shareholders",
+    "agenda",
+    "決議",
+    "開催",
+    "実施",
+    "分配",
+    "配当",
+    "支払",
+)
+
+JAPANESE_COMPANY_PATTERN = re.compile(
+    r"(?:株式会社|有限会社|合同会社|学校法人|医療法人)[^\s　、，()（）]{1,40}|[^\s　、，()（）]{1,40}(?:株式会社|有限会社|合同会社|学校法人|医療法人)",
+)
+
+ENGLISH_COMPANY_PATTERN = re.compile(
+    r"(?:[A-Z&][A-Za-z&'.-]*\s+){0,4}[A-Z&][A-Za-z&'.-]*\s+(?:Co\.?|Company|Corporation|Corp\.?|Inc\.?|Ltd\.?|Limited|Holdings|Group|LLC|PLC|GmbH|S\.A\.?|S\.P\.A\.?|Pte\.?\s+Ltd\.?|Pty\.?\s+Ltd\.?|AG|BV|NV)(?:\s+[A-Z][A-Za-z&'.-]*)*",
+    re.IGNORECASE,
+)
 
 COMPANY_LABEL_KEYWORDS = (
     "会社名",
@@ -153,18 +231,36 @@ class RuleBasedVoucherExtractor:
             exclude_keywords=COMPANY_EXCLUDE_KEYWORDS,
             allow_next_line=True,
         )
+        candidates: List[Tuple[float, str, str]] = []
+
+        def register_candidate(raw_text: str, context_weight: float) -> None:
+            for normalized, raw in self._generate_company_segments(raw_text):
+                score = self._score_company_candidate(normalized)
+                if score <= 0:
+                    continue
+                candidates.append((score - context_weight, normalized, raw))
+
         if labeled:
             value, raw = labeled
-            cleaned = self._clean_company_value(value)
-            if cleaned:
-                return cleaned, raw
+            register_candidate(value, 0.0)
+            register_candidate(raw, 0.05)
+
+        for page_index, line_index, text in lines:
+            if line_index > 10:
+                break
+            context_penalty = line_index * 0.1 + (page_index - 1) * 0.5
+            register_candidate(text, context_penalty)
 
         candidate = self._find_company_candidate_by_proximity(lines)
         if candidate:
-            cleaned = self._clean_company_value(candidate)
-            if cleaned:
-                return cleaned, candidate
-        return None
+            register_candidate(candidate, 0.2)
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], -len(item[1])), reverse=True)
+        _, best_value, best_raw = candidates[0]
+        return best_value, best_raw
 
     def _find_company_candidate_by_proximity(self, lines: Sequence[Tuple[int, int, str]]) -> Optional[str]:
         top_candidates: List[str] = []
@@ -418,14 +514,74 @@ class RuleBasedVoucherExtractor:
 
         return None
 
-    def _clean_company_value(self, value: str) -> str:
-        cleaned = value.strip().strip("・:：")
-        cleaned = cleaned.replace("株式會社", "株式会社")
-        cleaned = re.sub(r"[（(]?\s*\(株\)\s*[）)]?", "株式会社", cleaned)
-        cleaned = re.sub(r"株式会社\s+", "株式会社", cleaned)
-        cleaned = re.sub(r"\s+株式会社", "株式会社", cleaned)
-        cleaned = re.sub(r"株式?会社", "株式会社", cleaned)
-        return cleaned.strip()
+    def _generate_company_segments(self, text: str) -> List[Tuple[str, str]]:
+        candidates: List[Tuple[str, str]] = []
+        seen: Set[Tuple[str, str]] = set()
+
+        def add(raw_segment: str) -> None:
+            raw_segment = raw_segment.strip()
+            if not raw_segment:
+                return
+            normalized = self._normalize_company_value(raw_segment)
+            if not normalized:
+                return
+            key = (normalized.lower(), raw_segment)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append((normalized, raw_segment))
+
+        add(text)
+        for delimiter in ("／", "/", "|", "｜", "\n"):
+            for part in text.split(delimiter):
+                add(part)
+        for match in JAPANESE_COMPANY_PATTERN.finditer(text):
+            add(match.group())
+        for match in ENGLISH_COMPANY_PATTERN.finditer(text):
+            add(match.group())
+        return candidates
+
+    def _normalize_company_value(self, value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value)
+        normalized = normalized.replace("（株）", "株式会社").replace("(株)", "株式会社").replace("㈱", "株式会社")
+        normalized = normalized.replace("（有）", "有限会社").replace("(有)", "有限会社")
+        normalized = normalized.strip(" ,.;:・")
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = re.sub(r"(株式会社)+", "株式会社", normalized)
+        normalized = re.sub(r"(有限会社)+", "有限会社", normalized)
+        normalized = re.sub(r"(合同会社)+", "合同会社", normalized)
+        return normalized.strip()
+
+    def _score_company_candidate(self, candidate: str) -> float:
+        candidate = candidate.strip()
+        if not candidate:
+            return 0.0
+        if len(candidate) < 2 or len(candidate) > 80:
+            return 0.0
+        text_lower = candidate.lower()
+        if any(term in text_lower for term in COMPANY_INVALID_TERMS):
+            return 0.0
+
+        has_jp_keyword = any(keyword in candidate for keyword in JP_COMPANY_KEYWORDS)
+        has_en_keyword = any(keyword in text_lower for keyword in EN_COMPANY_KEYWORDS)
+        if not (has_jp_keyword or has_en_keyword):
+            return 0.0
+
+        score = 1.0
+        if has_jp_keyword:
+            score += 5.0
+        if has_en_keyword:
+            tokens = re.findall(r"[A-Za-z][\w&'.-]*", candidate)
+            uppercase_tokens = [token for token in tokens if token[0].isupper()]
+            if len(uppercase_tokens) < 2:
+                return 0.0
+            score += 4.0
+
+        if len(candidate) <= 30:
+            score += 1.0
+        if candidate.count(" ") <= 5:
+            score += 0.5
+        return score
 
     def _iter_page_lines(self, parsed: models.ParsedDocument) -> Iterable[Tuple[int, int, str]]:
         for page_index, page in enumerate(parsed.pages, start=1):
