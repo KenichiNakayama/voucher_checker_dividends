@@ -1,6 +1,7 @@
 """Streamlit entry point for the voucher checker application."""
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional
 
 try:
@@ -106,10 +107,17 @@ def render_results(result: models.VoucherAnalysisResult) -> None:
         st.markdown("<div class='voucher-card compact'>", unsafe_allow_html=True)
         st.markdown("<div class='voucher-section-title'>原本ダウンロード</div>", unsafe_allow_html=True)
         if result.highlight_pdf:
+            source_name = result.source_filename or "voucher.pdf"
+            base, ext = os.path.splitext(source_name)
+            if not base:
+                base = "voucher"
+            if not ext:
+                ext = ".pdf"
+            download_name = f"{base}_highlighted{ext}"
             st.download_button(
                 label="ハイライト付きPDFをダウンロード",
                 data=result.highlight_pdf,
-                file_name="voucher_highlight.pdf",
+                file_name=download_name,
                 mime="application/pdf",
                 type="primary",
             )
@@ -234,7 +242,7 @@ def main() -> None:
     )
 
     st.title("配当バウチャーAIアシスタント")
-    st.caption("配当決議書から重要項目を抽出し、証票確認をサポートします。")
+    st.caption("配当決議書から重要項目を抽出し、証憑確認をサポートします。")
 
     st.sidebar.header("設定")
     provider_label = st.sidebar.selectbox(
@@ -298,6 +306,7 @@ def main() -> None:
             store=store,
             session_key="latest",
         )
+        result.source_filename = uploaded_file.name
         st.session_state["analysis_result"] = result
 
     if "analysis_result" in st.session_state:

@@ -120,6 +120,46 @@ def test_rule_based_extractor_handles_english_suffix_without_label():
     assert extracted.dividend_amount.value == "2,500,000"
 
 
+def test_rule_based_extractor_prefers_metadata_title():
+    sample_page = (
+        "Resolved to distribute dividends to shareholders.\n"
+        "Dividend Distribution Resolution\n"
+        "XYZ Holdings Co., Ltd.\n"
+    )
+    tokens = [
+        models.TextSpan(page=1, text="Dividend Distribution Resolution", bbox=(0.1, 0.8, 0.9, 0.86)),
+    ]
+    parsed = models.ParsedDocument(
+        pages=[sample_page],
+        tokens=tokens,
+        metadata={"Title": "Dividend Payment Resolution"},
+    )
+    extractor = RuleBasedVoucherExtractor()
+
+    extracted = extractor.extract(parsed, provider=models.ProviderType.OPENAI)
+
+    assert extracted.title.value == "Dividend Payment Resolution"
+    assert extracted.title.confidence >= 0.8
+
+
+def test_rule_based_extractor_ignores_sentence_like_first_line():
+    sample_page = (
+        "取締役会で配当を決議することをここに報告いたします。\n"
+        "剰余金の配当決議書\n"
+        "ＡＢＣ株式会社\n"
+    )
+    tokens = [
+        models.TextSpan(page=1, text="剰余金の配当決議書", bbox=(0.15, 0.78, 0.85, 0.83)),
+    ]
+    parsed = models.ParsedDocument(pages=[sample_page], tokens=tokens, metadata={})
+    extractor = RuleBasedVoucherExtractor()
+
+    extracted = extractor.extract(parsed, provider=models.ProviderType.CLAUDE)
+
+    assert extracted.title.value == "剰余金の配当決議書"
+    assert extracted.title.confidence >= 0.75
+
+
 def test_rule_based_extractor_ignores_sentence_with_verbs_for_company():
     sample_page = (
         "Dividend Resolution\n"

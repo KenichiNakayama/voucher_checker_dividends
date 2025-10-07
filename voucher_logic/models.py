@@ -145,6 +145,7 @@ class VoucherAnalysisResult:
     highlight_pdf: bytes = b""
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    source_filename: str = ""
 
     @classmethod
     def empty(cls) -> "VoucherAnalysisResult":

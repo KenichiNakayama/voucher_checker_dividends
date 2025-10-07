@@ -11,6 +11,66 @@ from . import models
 from .llm.clients import DummyLLMClient, LLMClientFactory
 
 TITLE_PATTERN = re.compile(r"^(Dividend\s+Resolution|配当決議.*|Board\s+Resolution.*|配当.*報告書)$", re.IGNORECASE)
+TITLE_KEYWORDS_JP = (
+    "配当",
+    "剰余金",
+    "利益処分",
+    "決議",
+    "議事録",
+    "取締役会",
+    "株主総会",
+    "臨時株主総会",
+    "定時株主総会",
+)
+TITLE_SUFFIX_JP = (
+    "決議書",
+    "議事録",
+    "通知書",
+    "報告書",
+    "承認書",
+)
+TITLE_KEYWORDS_EN = (
+    "dividend",
+    "distribution",
+    "resolution",
+    "board",
+    "directors",
+    "shareholders",
+    "meeting",
+    "minutes",
+    "declaration",
+    "approval",
+    "consent",
+    "payment",
+)
+TITLE_SUFFIX_EN = (
+    "resolution",
+    "minutes",
+    "consent",
+    "certificate",
+    "declaration",
+    "notice",
+)
+TITLE_VERB_TERMS = (
+    "resolved",
+    "resolve",
+    "resolves",
+    "approved",
+    "approves",
+    "approve",
+    "hereby",
+    "shall",
+    "will",
+    "decided",
+    "decides",
+    "distribute",
+    "distributing",
+    "distributes",
+    "する",
+    "いたします",
+    "決議する",
+    "可決する",
+)
 COMPANY_LINE_PATTERN = re.compile(
     r"(?:Company\s*(?:Name)?|会社名|社名|Corporate\s+Name)\s*[:：-]\s*(.+)",
     re.IGNORECASE,
@@ -207,20 +267,123 @@ class RuleBasedVoucherExtractor:
         return data
 
     def _extract_title(self, parsed: models.ParsedDocument) -> models.FieldValue:
-        for token in parsed.tokens:
-            if TITLE_PATTERN.match(token.text.strip()):
-                span = self._highlight_from_token(token, label="title")
-                return models.FieldValue(value=token.text.strip(), confidence=0.9, source_spans=[span])
+        candidates: List[Tuple[float, str, str]] = []
+        seen: Set[str] = set()
 
-        if parsed.pages:
-            first_page_lines = [line.strip() for line in parsed.pages[0].splitlines() if line.strip()]
-            if first_page_lines:
-                value = first_page_lines[0]
-                span = self._find_span_by_text(parsed, value, label="title")
-                if span:
-                    return models.FieldValue(value=value, confidence=0.6, source_spans=[span])
-                return models.FieldValue(value=value, confidence=0.6)
+        def register_candidate(value: str, raw: str, score: float) -> None:
+            normalized_value = self._normalize_delimiters(value)
+            if not normalized_value:
+                return
+            key = normalized_value.lower()
+            if key in seen:
+                return
+            if score <= 0:
+                return
+            seen.add(key)
+            candidates.append((score, normalized_value, raw))
+
+        metadata_title = parsed.metadata.get("Title") if isinstance(parsed.metadata, dict) else None
+        if isinstance(metadata_title, str):
+            normalized_meta = self._normalize_delimiters(metadata_title)
+            meta_score = self._score_title_candidate(normalized_meta, page=0, line_index=0, from_metadata=True)
+            register_candidate(normalized_meta, normalized_meta, meta_score)
+
+        first_page_line: Optional[str] = None
+
+        for page_index, line_index, raw_line in self._iter_page_lines(parsed):
+            if page_index > 2:
+                break
+            normalized_line = self._normalize_delimiters(raw_line)
+            if not normalized_line:
+                continue
+            if first_page_line is None and page_index == 1:
+                first_page_line = normalized_line
+
+            if TITLE_PATTERN.match(normalized_line):
+                direct_score = 25.0 - (page_index - 1) * 5.0 - min(line_index, 5) * 1.0
+                register_candidate(normalized_line, raw_line, direct_score)
+                continue
+
+            score = self._score_title_candidate(normalized_line, page=page_index, line_index=line_index)
+            if score > 0:
+                register_candidate(normalized_line, raw_line, score)
+
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], -len(item[1])), reverse=True)
+            best_score, best_value, best_raw = candidates[0]
+            confidence = self._confidence_from_title_score(best_score)
+            span = self._find_span_by_text(parsed, best_raw, label="title") or self._find_span_by_text(
+                parsed, best_value, label="title"
+            )
+            if span:
+                return models.FieldValue(value=best_value, confidence=confidence, source_spans=[span])
+            return models.FieldValue(value=best_value, confidence=confidence)
+
+        if first_page_line:
+            span = self._find_span_by_text(parsed, first_page_line, label="title")
+            if span:
+                return models.FieldValue(value=first_page_line, confidence=0.5, source_spans=[span])
+            return models.FieldValue(value=first_page_line, confidence=0.5)
+
         return models.FieldValue.empty()
+
+    def _score_title_candidate(
+        self,
+        text: str,
+        *,
+        page: int,
+        line_index: int,
+        from_metadata: bool = False,
+    ) -> float:
+        normalized = self._normalize_delimiters(text)
+        if not normalized:
+            return 0.0
+        length = len(normalized)
+        if length < 4 or length > 80:
+            return 0.0
+        lowered = normalized.lower()
+
+        if any(term in lowered for term in TITLE_VERB_TERMS):
+            return 0.0
+        if normalized.endswith("。") or normalized.endswith("."):
+            return 0.0
+        if "resolved to" in lowered or "hereby" in lowered:
+            return 0.0
+
+        score = 12.0
+        if from_metadata:
+            score += 6.0
+        else:
+            score -= max(0, (page - 1)) * 5.0
+            score -= min(line_index, 8) * 0.8
+
+        has_keyword_jp = any(keyword in normalized for keyword in TITLE_KEYWORDS_JP)
+        has_keyword_en = any(keyword in lowered for keyword in TITLE_KEYWORDS_EN)
+        has_suffix_jp = any(normalized.endswith(suffix) for suffix in TITLE_SUFFIX_JP)
+        has_suffix_en = any(lowered.endswith(suffix) for suffix in TITLE_SUFFIX_EN)
+
+        if has_keyword_jp or has_keyword_en:
+            score += 4.5
+        if has_suffix_jp or has_suffix_en:
+            score += 5.0
+        if "配当" in normalized and "決議" in normalized:
+            score += 2.5
+        if "dividend" in lowered and "resolution" in lowered:
+            score += 2.5
+        if "minutes" in lowered and "board" in lowered:
+            score += 2.0
+
+        uppercase_tokens = re.findall(r"[A-Z]{2,}", normalized)
+        if len(uppercase_tokens) >= 2 and not has_keyword_en:
+            score -= 2.0
+
+        if score <= 0:
+            return 0.0
+        return score
+
+    def _confidence_from_title_score(self, score: float) -> float:
+        bounded = max(0.0, min(score, 28.0))
+        return max(0.55, min(0.95, 0.55 + bounded / 35.0))
 
     def _extract_company(self, parsed: models.ParsedDocument) -> Optional[Tuple[str, str]]:
         lines = self._collect_lines(parsed)

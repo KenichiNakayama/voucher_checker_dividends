@@ -1,19 +1,34 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Keep `app.py` dedicated to Streamlit layout and event wiring; move reusable parsing, validation, and state logic into `voucher_logic/` (e.g., `voucher_logic/controller.py`, `voucher_logic/validators.py`). Add new datasets or static assets under `assets/` and reference them with relative paths. Mirror runtime modules under `tests/` using matching filenames (`voucher_logic/highlight.py` → `tests/test_highlight.py`). Documentation such as this guide and release notes lives beside `README.md`.
+- UI entrypoint lives in `app.py`; keep it focused on Streamlit layout and event wiring.
+- Core logic sits under `voucher_logic/` (e.g., `extraction.py`, `validators.py`, `highlight.py`). Reuse these modules for new rules so they stay testable.
+- Session-level helpers, sample fixtures, and persistence stubs are colocated with their runtime counterparts; add new utilities in matching submodules.
+- Tests mirror runtime code in `tests/` (for example `tests/test_extraction.py`). Add new cases alongside the feature they verify.
+- Place static assets or reference documents in an `assets/` directory and load them via relative paths.
 
 ## Build, Test, and Development Commands
-Activate the environment before working: `source env/bin/activate`. Install dependencies with `pip install -r requirements.txt`; regenerate the lockfile via `pip freeze > requirements.txt` after upgrades. Run the UI using `streamlit run app.py` (use `--server.port 8502` when running multiple branches). Confirm dependencies with `python -m pip check`. Execute the suite and coverage using `pytest --cov=app`.
+- `source env/bin/activate` — activate the project virtualenv before development.
+- `pip install -r requirements.txt` — install Python dependencies; regenerate with `pip freeze > requirements.txt` after adding packages.
+- `streamlit run app.py` (or `streamlit run app.py --server.port 8502`) — launch the local UI for manual testing.
+- `python -m pip check` — validate dependency compatibility.
+- `pytest --cov=app` — run the automated test suite with coverage.
 
 ## Coding Style & Naming Conventions
-Follow PEP 8, 4-space indentation, and keep lines ≤88 characters. Use snake_case for variables, functions, and Streamlit widget keys; reserve PascalCase for classes. Group imports by standard library, third-party, then local modules. Keep Streamlit code declarative: define widgets top-to-bottom and isolate side effects inside helpers. Run `black` and `ruff` when available; otherwise format manually before committing.
+- Follow PEP 8 with 4-space indentation; keep lines ≤88 chars.
+- Use snake_case for functions, variables, and Streamlit widget keys; use PascalCase for classes.
+- Group imports by standard library, third-party, then local modules.
+- Run `black` or `ruff` if available; otherwise format manually before committing.
+- Keep Streamlit code declarative—declare widgets top-to-bottom and isolate side effects in helper functions under `voucher_logic/`.
 
 ## Testing Guidelines
-Tests use pytest; name cases `test_<condition>_<result>` to communicate intent. Create fixtures for voucher PDFs and Streamlit session state to keep behaviour deterministic. Target ≥80% statement coverage with `pytest --cov=app`, and note any manual verification steps in issue descriptions until automation is added.
+- Prefer pytest with fixture-based tests that mirror runtime modules (`tests/test_controller.py`, `tests/test_extraction.py`).
+- Name tests `test_<condition>_<result>` to clarify intent.
+- Target ≥80% statement coverage and review new logic with regression tests (e.g., Japanese/English voucher fixtures).
+- Document any manual validation steps when automated coverage is not feasible.
 
 ## Commit & Pull Request Guidelines
-Write commit subjects in the imperative mood under 72 characters (e.g., `Handle provider key loading`) and add a short body when context is unclear. Pull requests should describe the problem, summarize the fix, and list verification steps such as `streamlit run app.py`. Attach screenshots or GIFs for UI updates, link related issues, and verify `requirements.txt` is up to date before requesting review.
-
-## Security & Configuration Tips
-Never hard-code keys. For local work, store secrets in `.envrc` (ignored by Git) using lines like `export OPENAI_API_KEY="sk-..."`. For deployments, add the same keys under Streamlit App settings → Secrets. Load credentials through `voucher_logic.settings.get_provider_key()` so the app falls back gracefully when keys are absent.
+- Write commit subjects in imperative mood ≤72 characters (e.g., `Improve title extraction scoring`). Add short bodies when context is non-obvious.
+- Ensure `requirements.txt` is up to date before review.
+- Pull requests should describe the user problem, outline the solution, list verification steps (`streamlit run app.py`, `pytest --cov=app`), and attach UI screenshots or GIFs for layout changes.
+- Link related issues and highlight follow-up tasks or known limitations.
